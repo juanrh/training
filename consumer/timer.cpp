@@ -2,6 +2,7 @@
 #include <Poco/Thread.h>
 #include <Poco/Stopwatch.h>
 #include <boost/regex.hpp>
+#include "hello.h"
 
 #include <string>
 #include <iostream>
@@ -22,6 +23,8 @@ private:
 };
 
 int main(int argc, char** argv){
+    hello();
+
     TimerExample example;
     Timer timer(250, 500);
     timer.start(TimerCallback<TimerExample>(example, &TimerExample::onTimer));

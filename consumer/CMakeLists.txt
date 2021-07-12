@@ -8,4 +8,5 @@ conan_basic_setup(TARGETS)
 
 add_executable(timer timer.cpp)
 target_link_libraries(timer CONAN_PKG::poco
-                            CONAN_PKG::boost)
+                            CONAN_PKG::boost
+                            CONAN_PKG::hello)

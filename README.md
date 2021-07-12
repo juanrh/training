@@ -10,6 +10,9 @@ cd docker_environment
 docker-compose up -d
 # this connects to the client container
 docker exec -it conan-training bash
+
+# to stop later
+docker-compose stop
 ```
 
 with:
@@ -130,7 +133,7 @@ conan install .. -s build_type=Debug
 cmake .. -DCMAKE_BUILD_TYPE=Debug
 ```
 
-Conan generator just produce text files that happen to be in a format that a build system undestand. But we can even produce gcc flags directly, but leaving the `[generators]` section of `conanfile.txt` empty, and passing the `-g compiler_args` option to conan install.
+Conan [generator](https://docs.conan.io/en/latest/reference/generators.html) just produce text files that happen to be in a format that a build system undestand. But we can even produce gcc flags directly, but leaving the `[generators]` section of `conanfile.txt` empty, and passing the `-g compiler_args` option to conan install.
 
 ```bash
 cd consumer_gcc/
@@ -152,3 +155,164 @@ set(CMAKE_PREFIX_PATH ${CMAKE_BINARY_DIR} ${CMAKE_PREFIX_PATH})
 ```
 
 In this case `conan install ..` doesn't generate a single file `conanbuildinfo.cmake` like with the "cmake" generator, but several files FindPoco.cmake, FindBoost.cmake, etc, for each of the transitive dependencies
+
+
+## Creating Conan Packages
+
+Here our goal is to package a C++ library or executable into a Conan package. Basic outline of that process:
+
+- Create a conanfile.py that defines the packaging process
+  - `conan new` is a scaffolding tool that creates a template for a new project
+  - `conan create` builds the package and publish it locally (to ~/.conan), so it is visible by `conan search`
+    - NOTE `conan create` only modifies the local conan cache, it does NOT publish to remote artifactory repos. That requires an additional step. This is very nice because it allows to freely experiment locally 
+- The conanfile defines different binaries for different configuration (Release/Debug) of the package
+
+The `conanfile.py` defines a class extending `ConanFile` that:
+
+- Defines methods 
+  - `source` to fetch the source code: typically downloads it from github, using `self.run` to run a shell command, e.g. `self.run(git clone https://githum.com/...`
+  - `build` to build the package. For supported build systems we can use [build helpers aka "helper classes"](https://docs.conan.io/en/latest/reference/build_helpers.html) that are classes with methods that simplify using the existing build configuration (e.g. CMakeLists.txt) for the package we are building: e.g. run the build, parse the config files for the build to get metadata, pass options to the build, ... What this method is doing is basically __translate__ the build from the build system format to a format conan understands. Here we can also use `self.run` if we nee it
+  - `package` defines how to copy the artifacts (headers, binaries like .so or .a file) from the build directory to the package folder in the conan cache (~/.conan), a process known as _"capturing artifacts"_. `self.copy` can be used for this, using globs and relative paths (to the build directory for sources and to the package directory for destinatios). Note this should support artifacts for all OSs: this works because we use globs, so e.g. in a build for Linux we don' thave dylib but we have .so
+  - `package_info` defines the variables that are passed to consumers of this package, by adding them to the pre-created dictionary `self.cpp_info`: e.g. `self.cpp_info.libs = ["hello"]`, so this is not a dict but some kind of wrapper class. See more [here](https://docs.conan.io/en/latest/creating_packages/package_information.html). I guess conan generators use this to be able to translate the build to different build systems
+
+
+Regarding recipe references, we saw thay have the format `pkg/0.1@user/channel`. For official ConanCenter packages we omit `user/channel`, but we need them for custom packages:
+
+- user is usually the of a company, or a team or project
+- channel by convention usually is either "testing" or "stable"
+
+Example package creation
+
+```bash
+cd create
+# This creates scaffolding conanfile.py for building https://github.com/conan-io/hello.git with CMake
+# Note CMakeLists.txt is already created in that repo
+$ conan new hello/0.1
+File saved: conanfile.py
+# Build the package in . and publish it to the local conan cache swith user=user and channel=testing 
+conan create . user/testing
+# we can find the new package in the conan local cache: `version = "0.1"` is specified in conanfile.py
+conan@b8d324c1eea6:~/training/create$ conan search hello
+Existing package recipes:
+
+hello/0.1@user/testing
+conan@b8d324c1eea6:~/training/create$ conan search hello/0.1@user/testing
+Existing packages for recipe hello/0.1@user/testing:
+
+    Package_ID: 66c5327ebdcecae0a01a863939964495fa019a06
+        [options]
+            fPIC: True
+            shared: False
+        [settings]
+            arch: x86_64
+            build_type: Release
+            compiler: gcc
+            compiler.libcxx: libstdc++11
+            compiler.version: 7
+            os: Linux
+        Outdated from recipe: False
+
+conan@b8d324c1eea6:~/training/create$ 
+# Now create the same package but with Debug settings: note
+# this is smart enough to avoid cloning the package twice
+$ conan create . user/testing -s build_type=Debug
+Exporting package recipe
+hello/0.1@user/testing: The stored package has not changed
+...
+# we now see 2 binaries with 2 package ids for the same recipe reference "hello/0.1@user/testing",
+# one with debug symbols and another with release profile
+conan@b8d324c1eea6:~/training/create$ conan search hello/0.1@user/testing
+Existing packages for recipe hello/0.1@user/testing:
+
+    Package_ID: 1a651c5b4129ad794b88522bece2281a7453aee4
+        [options]
+            fPIC: True
+            shared: False
+        [settings]
+            arch: x86_64
+            build_type: Debug
+            compiler: gcc
+            compiler.libcxx: libstdc++11
+            compiler.version: 7
+            os: Linux
+        Outdated from recipe: False
+
+    Package_ID: 66c5327ebdcecae0a01a863939964495fa019a06
+        [options]
+            fPIC: True
+            shared: False
+        [settings]
+            arch: x86_64
+            build_type: Release
+            compiler: gcc
+            compiler.libcxx: libstdc++11
+            compiler.version: 7
+            os: Linux
+        Outdated from recipe: False
+
+conan@b8d324c1eea6:~/training/create$
+```
+
+We can now consume this package from the same host with the following simple modifications to the consumer project
+
+```diff
+diff --git a/consumer/CMakeLists.txt b/consumer/CMakeLists.txt
+index 639f042..cdaf044 100644
+--- a/consumer/CMakeLists.txt
++++ b/consumer/CMakeLists.txt
+@@ -8,4 +8,5 @@ conan_basic_setup(TARGETS)
+ 
+ add_executable(timer timer.cpp)
+ target_link_libraries(timer CONAN_PKG::poco
+-                            CONAN_PKG::boost)
++                            CONAN_PKG::boost
++                            CONAN_PKG::hello)
+diff --git a/consumer/conanfile.txt b/consumer/conanfile.txt
+index ace69a3..8d69c02 100644
+--- a/consumer/conanfile.txt
++++ b/consumer/conanfile.txt
+@@ -1,6 +1,7 @@
+ [requires]
+ boost/1.72.0
+ poco/1.9.4
++hello/0.1@user/testing^M
+ 
+ [generators]
+ cmake
+diff --git a/consumer/timer.cpp b/consumer/timer.cpp
+index a53216c..fb2e255 100644
+--- a/consumer/timer.cpp
++++ b/consumer/timer.cpp
+@@ -2,6 +2,7 @@
+ #include <Poco/Thread.h>
+ #include <Poco/Stopwatch.h>
+ #include <boost/regex.hpp>
++#include "hello.h"
+ 
+ #include <string>
+ #include <iostream>
+@@ -22,6 +23,8 @@ private:
+ };
+ 
+ int main(int argc, char** argv){
++    hello();
++
+     TimerExample example;
+     Timer timer(250, 500);
+     timer.start(TimerCallback<TimerExample>(example, &TimerExample::onTimer));
+```
+
+## Other Conan integrations
+
+- [meta-conan](https://github.com/conan-io/meta-conan) is a Yocto layer to "write simple Bitbake recipes to retrieve and deploy Conan packages from an Artifactory repository.
+
+
+## Conclusions
+
+- Conan is the missing sensible way of handling C++ dependencies
+- To consume packages, we have generators for several build systems
+  - For Cmake conan adds a single additional step to the usual flow
+  - Some build systems like Cmake or Visual Studio are very well supported. Others like Meson are supported through intermediate formats like [pkg_config files](https://docs.conan.io/en/latest/reference/generators/pkg_config.html)
+- To create packages, Conan doesn't simplify defining the build file by abstracting build systems, you start from a package that builds.
+  - TBD if it helps something with cross compilation: using `conan create` to publish to the local conan cache could help with this
+  - TBD if it conan could be easily combined with github actions for cross compilation: even if so, that would require commits so not for devel
