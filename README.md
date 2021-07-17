@@ -75,7 +75,7 @@ Dependencies are tracked in 3 places:
 __How does it work__: we call `conan install PATH_TO_conanfile.txt` _before_ calling our build system to make conan download our dependencies --and all their transitive dependencies-- and generate a file for our build system to access those dependencies.  
 
 - The `conan install` command first look for the dependencies in the local cache (`~/.conan`), and download all missing dependencies from the configured remote repositories, by default Conan Center is the only remote. You can configure additinal remotes, that have a priority number (smaller implies higher priority), so conan downloads each package from the remote with higher priority that has it.
-- For Cmake this implies extending the usual flow `mkdir build && cd build && cmake .. && build` by running conan install before cmake, as `mkdir build && cd build && conan install .. && cmake .. && build`, at least if we follow the convention of keeping `CMakeLists.txt` and `conanfile.txt` both at the top of our project.  
+- For Cmake this implies extending the usual flow `mkdir build && cd build && cmake .. && make` by running conan install before cmake, as `mkdir build && cd build && conan install .. && cmake .. && make`, at least if we follow the convention of keeping `CMakeLists.txt` and `conanfile.txt` both at the top of our project.  
   So __Cmake doesn't really know about conan__. 
   
 Example: 
@@ -162,7 +162,7 @@ In this case `conan install ..` doesn't generate a single file `conanbuildinfo.c
 Here our goal is to package a C++ library or executable into a Conan package. Basic outline of that process:
 
 - Create a conanfile.py that defines the packaging process
-  - `conan new` is a scaffolding tool that creates a template for a new project
+  - `conan new` is a scaffolding tool that creates a template for a new project. Pass the option `-t` to create a "test package", that is kind of a unit test but to check packagin works fine
   - `conan create` builds the package and publish it locally (to ~/.conan), so it is visible by `conan search`
     - NOTE `conan create` only modifies the local conan cache, it does NOT publish to remote artifactory repos. That requires an additional step. This is very nice because it allows to freely experiment locally 
 - The conanfile defines different binaries for different configuration (Release/Debug) of the package
@@ -302,6 +302,18 @@ index a53216c..fb2e255 100644
      timer.start(TimerCallback<TimerExample>(example, &TimerExample::onTimer));
 ```
 
+
+### Testing packages
+
+Regarding __test package__, if we passed `-t` to `conan new` that creates a `test_pacakge` directory for the test package, that has its own conanfile.py but that 1) implicitly depends on the test subject package; 2) doesn't define `source`, but it has to define `build` and also `test` that defines the test (usually calling a shell command called with `self.run`); 3) doesn't define `package` or `package_info`, because they have no consumers. 
+
+### Packaging local projects, and fetching code from other sources
+
+A conan recipe that packages github projects is called __out-of-source recipe__. If you want to package private projects you can use an __in source recipe__, that uses source code in the same folder as the conan recipe.  
+For that pass `-s` to `conan new`. That creates scaffolding for a simple C++ project. Also, in `conanfile.py` we'll have `exports_sources = "src/*"` as a class member that replaces the `source` method. 
+
+We can also use the `scm` class method to fetch the code from supported source control systems like git or SVN. This is just a shortcut for defining a `source` method. It's not clear to me which convention conan uses to make the files fetched by the `source` method accessible to other methods. I assume `conan create` runs in some working directory, and it just assumes the files are downloaded there, and that is how `self.run("git clone ...` for `source` works fine. I guess `exports_sources = "src/*"` basically leads to synthesizing a `source` method that does a `cp` from `CONANFILE_ROOT_ABS_PATH/exports_sources` to the current working directory. That way `exports_sources` would be just another convenient alias
+
 ## Other Conan integrations
 
 - [meta-conan](https://github.com/conan-io/meta-conan) is a Yocto layer to "write simple Bitbake recipes to retrieve and deploy Conan packages from an Artifactory repository.
@@ -316,3 +328,12 @@ index a53216c..fb2e255 100644
 - To create packages, Conan doesn't simplify defining the build file by abstracting build systems, you start from a package that builds.
   - TBD if it helps something with cross compilation: using `conan create` to publish to the local conan cache could help with this
   - TBD if it conan could be easily combined with github actions for cross compilation: even if so, that would require commits so not for devel
+- Per [`system_requirements()` section in Conan docs](https://docs.conan.io/en/1.36/reference/conanfile/methods.html#system-requirements) it looks like conan sometimes calls the OS package manager to install required dependencies. This calls for using Docker to ensure the build is repetible. 
+  - __TODO__ see [How to use Docker to create and cross-build C and C++ Conan packages](https://docs.conan.io/en/latest/howtos/run_conan_in_docker.html#docker-conan) to setup a better development flow. 
+    - Note the subtleties involved when using shared libraries. Combining Docker with [conan snap integration](https://docs.conan.io/en/1.38/integrations/deployment/snap.html) might be worth exploring
+  - TODO: also check disabling system requires automatic installation in the conan.conf. see https://docs.conan.io/en/latest/reference/config_files/conan.conf.html
+  
+        ```
+        [general]
+        sysrequires_mode = disabled
+        ```
