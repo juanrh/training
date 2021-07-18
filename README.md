@@ -303,6 +303,8 @@ index a53216c..fb2e255 100644
 ```
 
 
+We can check the local package cache for the artifacts but also for the build directory used, e.g. `~/.conan/data/hello/0.1/user/testing/build/` for the example above, with subdirectories for each package id. Id needed we can delete the cache with `conan remove "*" -f`, which deletes the whole cache, or using a more restrictive glob pattern to delete specific packages  
+
 ### Testing packages
 
 Regarding __test package__, if we passed `-t` to `conan new` that creates a `test_pacakge` directory for the test package, that has its own conanfile.py but that 1) implicitly depends on the test subject package; 2) doesn't define `source`, but it has to define `build` and also `test` that defines the test (usually calling a shell command called with `self.run`); 3) doesn't define `package` or `package_info`, because they have no consumers. 
@@ -314,10 +316,139 @@ For that pass `-s` to `conan new`. That creates scaffolding for a simple C++ pro
 
 We can also use the `scm` class method to fetch the code from supported source control systems like git or SVN. This is just a shortcut for defining a `source` method. It's not clear to me which convention conan uses to make the files fetched by the `source` method accessible to other methods. I assume `conan create` runs in some working directory, and it just assumes the files are downloaded there, and that is how `self.run("git clone ...` for `source` works fine. I guess `exports_sources = "src/*"` basically leads to synthesizing a `source` method that does a `cp` from `CONANFILE_ROOT_ABS_PATH/exports_sources` to the current working directory. That way `exports_sources` would be just another convenient alias
 
+## Sharing conan packages
+
+We can use the public Conan Center, or our own artifactory instance, they are basically the same software.  
+
+The artifactory repos are called __remotes__, and are listed with `conan remote list`. 
+
+- I create a local conan repo called "myconanrepo" in the artifactory instance running in a container configured at the top of this doc. I can add it as a remote called "artifactory" as follows: `conan remote add artifactory http://jfrog-artifactory-training:8081/artifactory/api/conan/myconanrepo`
+- Now I see the new remote:
+
+  ```bash
+  conan@b8d324c1eea6:~/training$ conan remote list
+  conan-center: https://conan.bintray.com [Verify SSL: True]
+  artifactory: http://jfrog-artifactory-training:8081/artifactory/api/conan/myconanrepo [Verify SSL: True]
+  conan@b8d324c1eea6:~/training$
+  ``` 
+
+- I can use the new remote passing `-r` to the `conan` command, which by default uses conan-center otherwise. E.g. to upload packages:
+
+  ```bash
+  # upload a recipe
+  conan upload "hello" -r artifactory
+  # upload a recipe and binaries
+  conan upload "hello" -r artifactory --all --confirm
+
+  # on a consumer package, install from a remote
+  conan install .. -r=artifactory
+  ```
+
+## Build configuration && cross-build
+
+Build configuration can be customized using both __settings__ and __options__, which are both hashed to build the package id.
+
+- __options__: e.g. shared vs static libs
+  - Options __apply to a single package__ and are defined in the recipe 
+    - defined as a class member `options` of the class that extends `ConanFile`, the value should be a dictionary from key to the list of possible values for the key. Also a class member `default_options` define the default values, as a key-value dict
+    - set on the call to `conan create` passing `-o key:value` for `key` the value to use 
+- __settings__: e.g. build type (Debug/release), compiler options (optimizations, thread support, etc), compiler itself (e.g. gcc, clang, ...), cross compilation config (which implies compiler etc)
+  - Settings __apply to the builds of all packages in the dependency tree__ aka dependency closure
+    - defined in `~/.conan/settings.yml`
+
+so __the difference between a setting and an option is the scope__
+
+I understand that when we use build helpers like [CMake](https://docs.conan.io/en/latest/reference/build_helpers/cmake.html), calling them on the `buid` method as e.g. `cmake.configure(source_folder="hello")` then those build helper classes access the settings and options to look for standard key like build type, and adjust the build accordingly.  
+
+- This implies that __if we define the`build` method manually then we have to manually comply with the settings and options__.  
+  - E.g. the options are available in `self.options` with an attribute for each options key. 
+  - If we are adding a custom option We can use features like `cmake.definitions` before the calls to `cmake.configure` and `cmake.build`, to change the build behaviour  
+
+The commands `conan inspect` and `conan get` can help debugging configuration issues
+
+Conan __profiles__ are a way to reuse a set of settings, options and also env vars by adding the to a profile file. We always use a profile, the default profile "default" is defined by conan during installation by inspecting the system
+
+- pass `-pr=PROFILE` to use a profile, if not specified that is equivalent to `-pr=default` 
+- profile files are defined in `~/.conan/profiles`, or as a file path relative to the current directory. Profiles in `~/.conan/profiles` or in the current directory are referred by file name, other profiles are referred as a path relative to the current directory
+- Use `conan config install` helper to easily edit a profile in `~/.conan/profiles`, or download it there from a remote source
+- profile files have an `[env]` section to define env vars used during the build, e.g. `CC` and `CXX`
+- profile files have some _modularity features_. E.g. in this one:
+
+  ```
+  CROSS_GCC=arm-linux-gnueabihf
+
+  include(default)
+
+  [setting]
+  arch=armv7
+
+  [env]
+  CC=$CROSS_GCC-gcc
+  CXX=$CROSS_GCC-g++
+  ```
+
+  we can see
+
+  - Usage of `include` to reuse the default profile
+  - Usage of `$CROSS_GCC` to expand the variable `CROSS_GCC` defined above
+
+- We can also specify _specific setting and env vars for specific packages_: e.g. adding `OpenSSL:compiler.version=4.8` to have that `compiler.version` setting only affecting the "OpenSSL" package
+- We can even pass several profiles to `conan` by using `-pr` several times in the same command. Conan will mix those profiles dynamically. We can also pass individual settings and options in the CLI beside profiles, using `-s` and `-o`
+- We can also add `build_requires` to as dependency of a conan package, without modifying the conan recipe. This can also be interested to install executables. See [doc on profiles](https://docs.conan.io/en/latest/reference/profiles.html) for more 
+- Profiles are useful for using Conan in CI settings. 
+
+### Example: using profiles for cross compilation to RPI
+
+See full example in `cross_build`.
+
+```bash
+conan@b8d324c1eea6:~/training/cross_build$ cat rpi_armv7 
+[settings]
+os=Linux
+compiler=gcc
+compiler.version=7
+compiler.libcxx=libstdc++11
+build_type=Release
+arch=armv7
+os_build=Linux
+arch_build=x86_64
+
+[env]
+CC=arm-linux-gnueabihf-gcc
+CXX=arm-linux-gnueabihf-g++
+conan@b8d324c1eea6:~/training/cross_build$ 
+```
+
+Note the usage of [conan nomenclature for cross compilation](https://docs.conan.io/en/latest/systems_cross_building/cross_building.html) where we have a __build platform__ that runs the build (e.g. your laptop, github actions server), and a __host platform__ that runs the artifact binaries (e.g. a RPI) ---when compilng a cross compiler then we also have a __target platform__ which is the platform that will run the cross compiler, which can be still be different to the host (e.g. build in Windows 10 as build platform a cross compiler to run on Ubuntu 18.04 as target platform a cross compiler that generates binaries to run on Raspbian X on RPI 3B+ as host platform). Here `arch` is the host platform architecture, and `arch_build` is the build platform architecture, and similarly for `os`.  
+We can use that profile to cross compile to RPI as follows:
+
+```bash
+conan@b8d324c1eea6:~/training/cross_build$ conan create . user/testing -pr=rpi_armv7
+...
+
+-- Build files have been written to: /home/conan/training/cross_build/test_package/build/12e9898eff79f5a720b503ea00bf9e942956e02d
+Scanning dependencies of target example
+[ 50%] Building CXX object CMakeFiles/example.dir/example.cpp.o
+[100%] Linking CXX executable bin/example
+[100%] Built target example
+hello/0.1@user/testing (test package): Running test()
+conan@b8d324c1eea6:~/training/cross_build$ 
+
+# We can now check this has been actually cross compiled for ARM: `file` shows the expected architecture, and we
+# cannot run the binary from the build plaform as expected
+conan@b8d324c1eea6:~/training/cross_build$ file /home/conan/training/cross_build/test_package/build/12e9898eff79f5a720b503ea00bf9e942956e02d/bin/example 
+/home/conan/training/cross_build/test_package/build/12e9898eff79f5a720b503ea00bf9e942956e02d/bin/example: ELF 32-bit LSB shared object, ARM, EABI5 version 1 (SYSV), dynamically linked, interpreter /lib/ld-linux-armhf.so.3, for GNU/Linux 3.2.0, BuildID[sha1]=011b1755da62efbf94ed04be47dd5aaf6ab22bce, not stripped
+conan@b8d324c1eea6:~/training/cross_build$ 
+
+conan@b8d324c1eea6:~/training/cross_build$ /home/conan/training/cross_build/test_package/build/12e9898eff79f5a720b503ea00bf9e942956e02d/bin/example
+bash: /home/conan/training/cross_build/test_package/build/12e9898eff79f5a720b503ea00bf9e942956e02d/bin/example: cannot execute binary file: Exec format error
+conan@b8d324c1eea6:~/training/cross_build$ 
+```
+
 ## Other Conan integrations
 
 - [meta-conan](https://github.com/conan-io/meta-conan) is a Yocto layer to "write simple Bitbake recipes to retrieve and deploy Conan packages from an Artifactory repository.
-
+- [conan snap integration](https://docs.conan.io/en/1.38/integrations/deployment/snap.html)
 
 ## Conclusions
 
@@ -326,10 +457,12 @@ We can also use the `scm` class method to fetch the code from supported source c
   - For Cmake conan adds a single additional step to the usual flow
   - Some build systems like Cmake or Visual Studio are very well supported. Others like Meson are supported through intermediate formats like [pkg_config files](https://docs.conan.io/en/latest/reference/generators/pkg_config.html)
 - To create packages, Conan doesn't simplify defining the build file by abstracting build systems, you start from a package that builds.
-  - TBD if it helps something with cross compilation: using `conan create` to publish to the local conan cache could help with this
-  - TBD if it conan could be easily combined with github actions for cross compilation: even if so, that would require commits so not for devel
+- Conan __helps with cross compilation__: see usage of `conan create` with a profile for cross compilation to RPI in "Example: using profiles for cross compilation to RPI" section below, which publishes RPI binaries to the local conan cache
+- Conan packages can be used to distribute executables for specific platforms, it could be feasible for simple systems. We could even use `build_requires` in a profile for a meta package that collects related tooling.
+  - E.g. for cross compilation we could have a fast devel flow based on a private artifactory service, from the build platform doing create and upload, and from the host platform doing install. This not be a replacement of a proper install, but could be used as an intermediate phase for quick manual testing and experimentation.
+  - TBD how far we can get with this, probably something like snaps or flatpak is a more scalable option 
 - Per [`system_requirements()` section in Conan docs](https://docs.conan.io/en/1.36/reference/conanfile/methods.html#system-requirements) it looks like conan sometimes calls the OS package manager to install required dependencies. This calls for using Docker to ensure the build is repetible. 
-  - __TODO__ see [How to use Docker to create and cross-build C and C++ Conan packages](https://docs.conan.io/en/latest/howtos/run_conan_in_docker.html#docker-conan) to setup a better development flow. 
+  - __TODO__ see [How to use Docker to create and cross-build C and C++ Conan packages](https://docs.conan.io/en/latest/howtos/run_conan_in_docker.html#docker-conan) to setup a better development flow. Note in fact the __docker container used in this course is a starting point__
     - Note the subtleties involved when using shared libraries. Combining Docker with [conan snap integration](https://docs.conan.io/en/1.38/integrations/deployment/snap.html) might be worth exploring
   - TODO: also check disabling system requires automatic installation in the conan.conf. see https://docs.conan.io/en/latest/reference/config_files/conan.conf.html
   
